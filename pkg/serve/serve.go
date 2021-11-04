@@ -9,28 +9,49 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
-	"cloud.google.com/go/storage"
+	"github.com/aliyun/aliyun-oss-go-sdk/oss"
+
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/types"
 	"golang.org/x/sync/errgroup"
-	"google.golang.org/api/googleapi"
 )
 
-var bucket = os.Getenv("BUCKET")
+var (
+	bucket    = os.Getenv("BUCKET")
+	endpoint  = os.Getenv("ENDPOINT")
+	accessID  = os.Getenv("ACCESS_KEY_ID")
+	accessKey = os.Getenv("ACCESS_KEY_SECRET")
+)
+
+const (
+	metaContentLength       = "Content-Length"
+	metaContentType         = "Content-Type"
+	metaDockerContentDigest = "Docker-Content-Digest"
+)
 
 func Blob(w http.ResponseWriter, r *http.Request, name string) {
-	url := fmt.Sprintf("https://storage.googleapis.com/%s/blobs/%s", bucket, name)
+	url := fmt.Sprintf("https://%s.%s/blobs/%s", bucket, endpoint, name)
 	http.Redirect(w, r, url, http.StatusSeeOther)
 }
 
 type Storage struct {
-	client *storage.Client
+	client *oss.Client
 }
 
 func NewStorage(ctx context.Context) (*Storage, error) {
-	client, err := storage.NewClient(ctx)
+	if endpoint == "" {
+		endpoint = "oss-cn-beijing.aliyuncs.com"
+	}
+	if bucket == "" {
+		bucket = "nydus-demo"
+	}
+
+	ossEndpoint := fmt.Sprintf("https://%s", endpoint)
+	client, err := oss.New(ossEndpoint, accessID, accessKey)
 	if err != nil {
 		return nil, fmt.Errorf("NewClient: %v", err)
 	}
@@ -38,73 +59,75 @@ func NewStorage(ctx context.Context) (*Storage, error) {
 }
 
 func (s *Storage) BlobExists(ctx context.Context, name string) (v1.Descriptor, error) {
-	obj, err := s.client.Bucket(bucket).Object(fmt.Sprintf("blobs/%s", name)).Attrs(ctx)
+	bucket, err := s.client.Bucket(bucket)
 	if err != nil {
 		return v1.Descriptor{}, err
 	}
+	fmt.Println("get bucket: ", bucket)
+	objMetadata, err := bucket.GetObjectDetailedMeta(fmt.Sprintf("blobs/%s", name))
+	if err != nil {
+		return v1.Descriptor{}, err
+	}
+	fmt.Printf("get objMetadata: %+v\n", objMetadata)
+
 	var h v1.Hash
-	if d := obj.Metadata["Docker-Content-Digest"]; d != "" {
-		h, err = v1.NewHash(d)
+	if d := objMetadata["X-Oss-Meta-"+metaDockerContentDigest]; len(d) == 1 {
+		h, err = v1.NewHash(d[0])
 		if err != nil {
 			return v1.Descriptor{}, err
 		}
 	}
 
+	var size int64 = 0
+	if d := objMetadata[metaContentLength]; len(d) == 1 {
+		size, err = strconv.ParseInt(d[0], 10, 64)
+		if err != nil {
+			return v1.Descriptor{}, err
+		}
+		fmt.Printf("get size: %+v\n", size)
+	}
+
 	return v1.Descriptor{
 		Digest:    h,
-		MediaType: types.MediaType(obj.ContentType),
-		Size:      obj.Size,
+		MediaType: types.MediaType(objMetadata[metaContentType][0]),
+		Size:      size,
 	}, nil
 }
 
+// FIXME only used in cmd/wait/main.go
 func (s *Storage) WriteObject(ctx context.Context, name, contents string) error {
-	w := s.client.Bucket(bucket).Object(fmt.Sprintf("blobs/%s", name)).
-		If(storage.Conditions{DoesNotExist: true}).
-		NewWriter(ctx)
-	if _, err := fmt.Fprintln(w, contents); err != nil {
-		if herr, ok := err.(*googleapi.Error); ok && herr.Code == http.StatusPreconditionFailed {
-			return nil
-		}
-		return fmt.Errorf("fmt.Fprintln: %v", err)
+	bucket, err := s.client.Bucket(bucket)
+	if err != nil {
+		return err
 	}
-	if err := w.Close(); err != nil {
-		if herr, ok := err.(*googleapi.Error); ok && herr.Code == http.StatusPreconditionFailed {
-			return nil
-		}
-		return fmt.Errorf("w.Close: %v", err)
-	}
-	return nil
+	key := fmt.Sprintf("blobs/%s", name)
+	return bucket.PutObject(key, strings.NewReader(contents))
 }
 
 func (s *Storage) writeBlob(ctx context.Context, name string, h v1.Hash, rc io.ReadCloser, contentType string) error {
 	start := time.Now()
 	defer func() { log.Printf("writeBlob(%q) took %s", name, time.Since(start)) }()
 
-	// The DoesNotExist precondition can be hit when writing or flushing
-	// data, which can happen any of three places. Anywhere it happens,
-	// just ignore the error since that means the blob already exists.
-	w := s.client.Bucket(bucket).Object(fmt.Sprintf("blobs/%s", name)).
-		If(storage.Conditions{DoesNotExist: true}).
-		NewWriter(ctx)
-	w.ObjectAttrs.ContentType = contentType
-	w.Metadata = map[string]string{"Docker-Content-Digest": h.String()}
-	if _, err := io.Copy(w, rc); err != nil {
-		if herr, ok := err.(*googleapi.Error); ok && herr.Code == http.StatusPreconditionFailed {
-			return nil
-		}
-		return fmt.Errorf("Copy: %v", err)
+	bucket, err := s.client.Bucket(bucket)
+	if err != nil {
+		return err
 	}
+	key := fmt.Sprintf("blobs/%s", name)
+
+	options := []oss.Option{
+		oss.ContentType(contentType),
+		oss.Meta(metaContentType, contentType),
+		oss.Meta(metaDockerContentDigest, h.String()),
+	}
+
+	err = bucket.PutObject(key, rc, options...)
+	if err != nil {
+		// FIXME: handle already exist error
+		return err
+	}
+
 	if err := rc.Close(); err != nil {
-		if herr, ok := err.(*googleapi.Error); ok && herr.Code == http.StatusPreconditionFailed {
-			return nil
-		}
 		return fmt.Errorf("rc.Close: %v", err)
-	}
-	if err := w.Close(); err != nil {
-		if herr, ok := err.(*googleapi.Error); ok && herr.Code == http.StatusPreconditionFailed {
-			return nil
-		}
-		return fmt.Errorf("w.Close: %v", err)
 	}
 	return nil
 }
@@ -166,9 +189,9 @@ func (s *Storage) ServeIndex(w http.ResponseWriter, r *http.Request, idx v1.Imag
 		if err != nil {
 			return err
 		}
-		w.Header().Set("Docker-Content-Digest", digest.String())
-		w.Header().Set("Content-Type", string(mt))
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", s))
+		w.Header().Set(metaDockerContentDigest, digest.String())
+		w.Header().Set(metaContentType, string(mt))
+		w.Header().Set(metaContentLength, fmt.Sprintf("%d", s))
 		return nil
 	}
 
@@ -243,7 +266,7 @@ func (s *Storage) WriteImage(ctx context.Context, img v1.Image, also ...string) 
 		})
 	}
 	return g.Wait()
-	return nil
+
 }
 
 // ServeManifest writes config and layer blobs for the image, then writes and
@@ -269,9 +292,9 @@ func (s *Storage) ServeManifest(w http.ResponseWriter, r *http.Request, img v1.I
 		if err != nil {
 			return err
 		}
-		w.Header().Set("Docker-Content-Digest", digest.String())
-		w.Header().Set("Content-Type", string(mt))
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", s))
+		w.Header().Set(metaDockerContentDigest, digest.String())
+		w.Header().Set(metaContentType, string(mt))
+		w.Header().Set(metaContentLength, fmt.Sprintf("%d", s))
 		return nil
 	}
 

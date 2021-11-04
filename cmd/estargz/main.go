@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -102,6 +103,8 @@ func (s *server) serveEstartgzManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	fmt.Println("image ref parsed: ", ref)
+
 	// Determine whether the ref is for an image or index.
 	desc, err := remote.Get(ref, remote.WithContext(ctx))
 	if err != nil {
@@ -109,6 +112,7 @@ func (s *server) serveEstartgzManifest(w http.ResponseWriter, r *http.Request) {
 		serve.Error(w, err)
 		return
 	}
+	dump("image desc descriptor", desc.Descriptor)
 
 	// Check if we have a estargzed manifest cached (since HEAD failed
 	// before), and if so serve it directly.
@@ -134,6 +138,7 @@ func (s *server) serveEstartgzManifest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) estargz(w http.ResponseWriter, r *http.Request, desc *remote.Descriptor, ck string) error {
+
 	switch desc.MediaType {
 	case types.OCIImageIndex, types.DockerManifestList:
 		idx, err := desc.ImageIndex()
@@ -182,11 +187,13 @@ func optimizeImage(img v1.Image) (v1.Image, error) {
 	if err != nil {
 		return nil, err
 	}
+	dump("original image", oimg)
 
 	layers, err := img.Layers()
 	if err != nil {
 		return nil, err
 	}
+	dump("original image layers", layers)
 
 	olayers := make([]mutate.Addendum, 0, len(layers))
 	for _, layer := range layers {
@@ -194,6 +201,7 @@ func optimizeImage(img v1.Image) (v1.Image, error) {
 		if err != nil {
 			return nil, err
 		}
+		dump("image layer", olayer)
 
 		olayers = append(olayers, mutate.Addendum{
 			Layer:     olayer,
@@ -217,15 +225,19 @@ func optimizeIndex(idx v1.ImageIndex) (v1.ImageIndex, error) {
 	// Build an image for each child from the base and append it to a new index to produce the result.
 	adds := make([]mutate.IndexAddendum, 0, len(im.Manifests))
 	for _, desc := range im.Manifests {
+		fmt.Printf("image manifests digest %+v \n", desc.Digest)
 		img, err := idx.Image(desc.Digest)
 		if err != nil {
 			return nil, err
 		}
+		fmt.Printf("image %+v \n", img)
 
 		oimg, err := optimizeImage(img)
 		if err != nil {
 			return nil, err
 		}
+		dump("image of index", oimg)
+
 		adds = append(adds, mutate.IndexAddendum{
 			Add: oimg,
 			Descriptor: v1.Descriptor{
@@ -243,4 +255,13 @@ func optimizeIndex(idx v1.ImageIndex) (v1.ImageIndex, error) {
 	}
 
 	return mutate.IndexMediaType(mutate.AppendManifests(empty.Index, adds...), idxType), nil
+}
+
+func dump(msg string, v interface{}) {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		fmt.Printf("[%s]failed to marshal value: %s\n", msg, err)
+	} else {
+		fmt.Printf("%s: %s\n", msg, b)
+	}
 }

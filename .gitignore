@@ -1,6 +1,6 @@
 ###
 # https://github.com/github/gitignore/blob/master/Terraform.gitignore
-
+bin/*
 # Local .terraform directories
 **/.terraform/*
 
@@ -50,3 +50,4 @@ terraform.rc
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+.env

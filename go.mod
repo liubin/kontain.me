@@ -4,7 +4,8 @@ go 1.15
 
 require (
 	cloud.google.com/go v0.97.0
-	cloud.google.com/go/storage v1.17.0
+	github.com/aliyun/aliyun-oss-go-sdk v2.1.10+incompatible
+	github.com/baiyubin/aliyun-sts-go-sdk v0.0.0-20180326062324-cfa1a18b161f // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.9.0 // indirect
 	github.com/docker/cli v20.10.9+incompatible // indirect
 	github.com/docker/docker v20.10.9+incompatible // indirect
@@ -22,7 +23,7 @@ require (
 	golang.org/x/sys v0.0.0-20211007075335-d3039528d8ac // indirect
 	golang.org/x/text v0.3.7 // indirect
 	golang.org/x/tools v0.1.7 // indirect
-	google.golang.org/api v0.58.0
+	google.golang.org/api v0.58.0 // indirect
 	google.golang.org/genproto v0.0.0-20211005153810-c76a74d43a8e // indirect
 	google.golang.org/grpc v1.41.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0
